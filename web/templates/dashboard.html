@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}داشبورد{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>داشبورد مدیریت</h1>
+  <a class="logout" href="/logout">خروج</a>
+</div>
+<div class="card">
+  <p>خوش آمدید، <b>{{ admin }}</b>.</p>
+  <p class="muted">
+    این پنل در مرحله راه‌اندازی اولیه (فاز ۱) است. امکانات مدیریت
+    محصولات، سفارش‌ها و کاربران در فازهای بعدی اضافه می‌شوند.
+  </p>
+</div>
+{% endblock %}
