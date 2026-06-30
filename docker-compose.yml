@@ -34,7 +34,12 @@ services:
       context: .
       dockerfile: docker/Dockerfile.bot
     restart: unless-stopped
-    env_file: .env
+    # Mount .env read-only and let pydantic-settings read it directly. We do
+    # NOT use `env_file:` here because Compose interpolates env_file values,
+    # which would corrupt the bcrypt password hash ($2b$...) and leak secrets
+    # into the image. The file is also excluded from the build via .dockerignore.
+    volumes:
+      - ./.env:/app/.env:ro
     depends_on:
       db:
         condition: service_healthy
@@ -46,7 +51,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.web
     restart: unless-stopped
-    env_file: .env
+    volumes:
+      - ./.env:/app/.env:ro
     depends_on:
       db:
         condition: service_healthy

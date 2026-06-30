@@ -112,6 +112,18 @@ clone_repo() {
 }
 
 prompt_inputs() {
+  # Reuse secrets from an existing .env so re-runs don't break the already
+  # initialized Postgres volume (its password is fixed at first init) or
+  # invalidate existing JWT sessions.
+  local env_file="$INSTALL_DIR/.env"
+  EXISTING_DB_PASSWORD=""
+  EXISTING_SECRET_KEY=""
+  if [ -f "$env_file" ]; then
+    EXISTING_DB_PASSWORD="$(grep -E '^DB_PASSWORD=' "$env_file" | head -n1 | cut -d= -f2- || true)"
+    EXISTING_SECRET_KEY="$(grep -E '^SECRET_KEY=' "$env_file" | head -n1 | cut -d= -f2- || true)"
+    [ -n "$EXISTING_DB_PASSWORD" ] && c_info "Existing .env found — reusing the current database password unless you enter a new one."
+  fi
+
   c_info "Configuration (input is not stored until written to a chmod 600 .env):"
   read -rp "  BOT_TOKEN: " BOT_TOKEN
   read -rp "  MAIN_ADMIN_ID (numeric Telegram id): " MAIN_ADMIN_ID
@@ -127,8 +139,10 @@ prompt_inputs() {
   done
   WEB_ADMIN_PASSWORD="$pw1"
 
-  read -rsp "  Database password: " DB_PASSWORD; echo
-  [ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(openssl rand -hex 16)"
+  read -rsp "  Database password (Enter to keep existing/generate): " DB_PASSWORD; echo
+  if [ -z "$DB_PASSWORD" ]; then
+    DB_PASSWORD="${EXISTING_DB_PASSWORD:-$(openssl rand -hex 16)}"
+  fi
 
   read -rp "  LOG_GROUP_ID (optional, Enter to skip): " LOG_GROUP_ID || true
 
@@ -139,7 +153,7 @@ prompt_inputs() {
 write_env() {
   local env_file="$INSTALL_DIR/.env"
   local secret_key db_url hash
-  secret_key="$(openssl rand -hex 48)"
+  secret_key="${EXISTING_SECRET_KEY:-$(openssl rand -hex 48)}"
   db_url="postgresql+asyncpg://appstore:${DB_PASSWORD}@db:5432/appstore"
 
   # Write .env FIRST with a placeholder hash. The web service mounts .env via

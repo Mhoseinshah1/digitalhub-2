@@ -1,0 +1,27 @@
+# Never bake secrets or local cruft into images.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Local dev artifacts
+*.sqlite3
+*.db
+local.db
+backups/
+*.log
+
+# Host-only provisioning state
+nginx/
+certbot/
