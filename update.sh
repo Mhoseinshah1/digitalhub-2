@@ -12,6 +12,7 @@ set -euo pipefail
 REPO_URL="https://github.com/Mhoseinshah1/digitalhub-2"
 INSTALL_DIR="${INSTALL_DIR:-/opt/appstore-bot}"
 BACKUP_DIR="$INSTALL_DIR/backups"
+COMPOSE_ENV_FILE="$INSTALL_DIR/compose.env"
 
 c_info() { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 c_ok()   { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
@@ -22,11 +23,22 @@ die()    { c_err "$*"; exit 1; }
 cd "$INSTALL_DIR" || die "Install dir $INSTALL_DIR not found."
 [ -f .env ] || die ".env missing; run install.sh first."
 
+# Ensure compose.env exists (older installs only had .env), then wrap compose.
+ensure_compose_env() {
+  [ -f "$COMPOSE_ENV_FILE" ] && return 0
+  local pw
+  pw="$(grep -E '^DB_PASSWORD=' .env | head -n1 | cut -d= -f2-)"
+  ( umask 077; printf 'DB_PASSWORD=%s\n' "${pw//\$/\$\$}" > "$COMPOSE_ENV_FILE" )
+  chmod 600 "$COMPOSE_ENV_FILE"
+}
+ensure_compose_env
+dc() { docker compose --env-file "$COMPOSE_ENV_FILE" "$@"; }
+
 backup_db() {
   mkdir -p "$BACKUP_DIR"
   BACKUP_FILE="$BACKUP_DIR/pre_update_$(date +%Y%m%d_%H%M%S).sql"
   c_info "Backing up database to $BACKUP_FILE…"
-  docker compose exec -T db pg_dump -U appstore appstore > "$BACKUP_FILE" \
+  dc exec -T db pg_dump -U appstore appstore > "$BACKUP_FILE" \
     || die "Database backup failed; aborting update."
   c_ok "Backup complete."
 }
@@ -34,7 +46,7 @@ backup_db() {
 restore_db() {
   [ -n "${BACKUP_FILE:-}" ] && [ -f "$BACKUP_FILE" ] || { c_warn "No backup to restore."; return; }
   c_warn "Rolling back database from $BACKUP_FILE…"
-  docker compose exec -T db psql -U appstore -d appstore < "$BACKUP_FILE" \
+  dc exec -T db psql -U appstore -d appstore < "$BACKUP_FILE" \
     && c_ok "Database restored." || c_err "Restore failed; backup kept at $BACKUP_FILE."
 }
 
@@ -59,10 +71,10 @@ do_update() {
   git pull origin main --ff-only
 
   c_info "Rebuilding and restarting services…"
-  docker compose up -d --build
+  dc up -d --build
 
   c_info "Applying migrations…"
-  docker compose run --rm web alembic upgrade head
+  dc run --rm web alembic upgrade head
 
   trap - ERR
   c_ok "Update complete (now at version $(cat VERSION))."
@@ -70,4 +82,4 @@ do_update() {
 
 check_version
 do_update
-docker compose ps
+dc ps

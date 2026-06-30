@@ -9,6 +9,7 @@ set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/appstore-bot}"
 BACKUP_DIR="$INSTALL_DIR/backups"
+COMPOSE_ENV_FILE="$INSTALL_DIR/compose.env"
 
 c_info() { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 c_ok()   { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
@@ -16,6 +17,21 @@ c_err()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 die()    { c_err "$*"; exit 1; }
 
 cd "$INSTALL_DIR" || die "Install dir $INSTALL_DIR not found."
+
+# Ensure compose.env exists (older installs only had .env). It holds just
+# DB_PASSWORD for Compose interpolation; the app reads ./.env via a mount.
+ensure_compose_env() {
+  [ -f "$COMPOSE_ENV_FILE" ] && return 0
+  [ -f "$INSTALL_DIR/.env" ] || die ".env not found; run install.sh first."
+  local pw
+  pw="$(grep -E '^DB_PASSWORD=' "$INSTALL_DIR/.env" | head -n1 | cut -d= -f2-)"
+  ( umask 077; printf 'DB_PASSWORD=%s\n' "${pw//\$/\$\$}" > "$COMPOSE_ENV_FILE" )
+  chmod 600 "$COMPOSE_ENV_FILE"
+}
+ensure_compose_env
+
+# docker compose wrapper using our dedicated env file (never auto-loads ./.env).
+dc() { docker compose --env-file "$COMPOSE_ENV_FILE" "$@"; }
 
 usage() {
   cat <<EOF
@@ -34,14 +50,14 @@ Commands:
 EOF
 }
 
-cmd_start()   { docker compose up -d; c_ok "Started."; }
-cmd_stop()    { docker compose down; c_ok "Stopped."; }
-cmd_restart() { docker compose restart; c_ok "Restarted."; }
-cmd_status()  { docker compose ps; }
+cmd_start()   { dc up -d; c_ok "Started."; }
+cmd_stop()    { dc down; c_ok "Stopped."; }
+cmd_restart() { dc restart; c_ok "Restarted."; }
+cmd_status()  { dc ps; }
 
 cmd_logs() {
-  if [ "${1:-}" = "" ]; then docker compose logs -f --tail=200
-  else docker compose logs -f --tail=200 "$1"; fi
+  if [ "${1:-}" = "" ]; then dc logs -f --tail=200
+  else dc logs -f --tail=200 "$1"; fi
 }
 
 cmd_update() { bash "$INSTALL_DIR/update.sh"; }
@@ -49,7 +65,7 @@ cmd_update() { bash "$INSTALL_DIR/update.sh"; }
 cmd_backup() {
   mkdir -p "$BACKUP_DIR"
   local f="$BACKUP_DIR/manual_$(date +%Y%m%d_%H%M%S).sql"
-  docker compose exec -T db pg_dump -U appstore appstore > "$f"
+  dc exec -T db pg_dump -U appstore appstore > "$f"
   c_ok "Backup written to $f"
 }
 
@@ -57,7 +73,7 @@ cmd_restore() {
   local f="${1:-}"
   [ -n "$f" ] && [ -f "$f" ] || die "Provide a valid backup file: appstore restore <file>"
   c_info "Restoring database from $f…"
-  docker compose exec -T db psql -U appstore -d appstore < "$f"
+  dc exec -T db psql -U appstore -d appstore < "$f"
   c_ok "Restore complete."
 }
 
@@ -71,9 +87,9 @@ cmd_admin_reset() {
   done
   c_info "Hashing password…"
   local hash
-  hash="$(docker compose run --rm --no-deps -e PW="$pw1" web \
+  hash="$(dc run --rm --no-deps -e PW="$pw1" web \
     python -c 'import os; from passlib.hash import bcrypt; print(bcrypt.hash(os.environ["PW"]))' \
-    | tr -d "\r")"
+    2>/dev/null | tr -d "\r" | tail -n 1)"
   [ -n "$hash" ] || die "Failed to hash password."
   # Replace the hash line in .env in place (preserves chmod 600).
   if grep -q '^WEB_ADMIN_PASSWORD_HASH=' .env; then
@@ -82,7 +98,7 @@ cmd_admin_reset() {
     echo "WEB_ADMIN_PASSWORD_HASH=${hash}" >> .env
   fi
   unset pw1 pw2
-  docker compose up -d web
+  dc up -d web
   c_ok "Admin password updated. Web service restarted."
 }
 
