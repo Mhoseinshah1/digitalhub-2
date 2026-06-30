@@ -167,14 +167,13 @@ prompt_inputs() {
 
 write_env() {
   local env_file="$INSTALL_DIR/.env"
-  local secret_key db_url hash
+  local secret_key db_url hash db_pw_enc
   secret_key="${EXISTING_SECRET_KEY:-$(openssl rand -hex 48)}"
-  db_url="postgresql+asyncpg://appstore:${DB_PASSWORD}@db:5432/appstore"
 
-  # Write the app config (.env) with a placeholder hash, plus a separate
-  # compose.env (only DB_PASSWORD) for Compose interpolation. Both must exist
-  # before any `dc` (docker compose) call below: the app reads ./.env via a
-  # read-only mount, and Compose reads compose.env via --env-file.
+  # Write the app config (.env) with placeholder hash + DATABASE_URL, plus a
+  # separate compose.env (only DB_PASSWORD) for Compose interpolation. Both must
+  # exist before any `dc` (docker compose) call below: the app reads ./.env via
+  # a read-only mount, and Compose reads compose.env via --env-file.
   c_info "Writing $env_file and compose.env (chmod 600)…"
   umask 077
   cat > "$env_file" <<EOF
@@ -188,7 +187,7 @@ WEB_ADMIN_USERNAME=${WEB_ADMIN_USERNAME}
 WEB_ADMIN_PASSWORD_HASH=PENDING
 
 DB_PASSWORD=${DB_PASSWORD}
-DATABASE_URL=${db_url}
+DATABASE_URL=PENDING
 
 REDIS_URL=redis://redis:6379/0
 
@@ -211,8 +210,21 @@ EOF
     2>/dev/null | tr -d '\r' | tail -n 1)"
   [ -n "$hash" ] || die "Failed to hash admin password."
 
-  # Patch the real hash into .env (preserves chmod 600).
+  # Percent-encode the DB password for the DATABASE_URL so URL-special chars
+  # (@ : / # ?) don't corrupt parsing. Postgres' POSTGRES_PASSWORD and the
+  # ALTER USER reconcile use the literal value; SQLAlchemy/asyncpg decode the
+  # encoded form back to the same literal, keeping all three consistent.
+  db_pw_enc="$(dc run --rm --no-deps \
+    -e PW="$DB_PASSWORD" web \
+    python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PW"], safe=""))' \
+    2>/dev/null | tr -d '\r' | tail -n 1)"
+  [ -n "$db_pw_enc" ] || die "Failed to encode database password."
+  db_url="postgresql+asyncpg://appstore:${db_pw_enc}@db:5432/appstore"
+
+  # Patch the real hash and the encoded DATABASE_URL into .env (preserves
+  # chmod 600). Neither value contains a '|', so it is a safe sed delimiter.
   sed -i "s|^WEB_ADMIN_PASSWORD_HASH=.*|WEB_ADMIN_PASSWORD_HASH=${hash}|" "$env_file"
+  sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${db_url}|" "$env_file"
 
   # Clear plaintext password from shell memory.
   unset WEB_ADMIN_PASSWORD pw1 pw2 2>/dev/null || true

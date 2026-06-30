@@ -20,18 +20,19 @@ cd "$INSTALL_DIR" || die "Install dir $INSTALL_DIR not found."
 
 # Ensure compose.env exists (older installs only had .env). It holds just
 # DB_PASSWORD for Compose interpolation; the app reads ./.env via a mount.
+# Called lazily from dc() so non-docker commands (help/usage) don't require .env.
 ensure_compose_env() {
   [ -f "$COMPOSE_ENV_FILE" ] && return 0
   [ -f "$INSTALL_DIR/.env" ] || die ".env not found; run install.sh first."
   local pw
-  pw="$(grep -E '^DB_PASSWORD=' "$INSTALL_DIR/.env" | head -n1 | cut -d= -f2-)"
+  pw="$(grep -E '^DB_PASSWORD=' "$INSTALL_DIR/.env" | head -n1 | cut -d= -f2- || true)"
+  [ -n "$pw" ] || die "No DB_PASSWORD= line in .env; cannot generate compose.env."
   ( umask 077; printf 'DB_PASSWORD=%s\n' "${pw//\$/\$\$}" > "$COMPOSE_ENV_FILE" )
   chmod 600 "$COMPOSE_ENV_FILE"
 }
-ensure_compose_env
 
 # docker compose wrapper using our dedicated env file (never auto-loads ./.env).
-dc() { docker compose --env-file "$COMPOSE_ENV_FILE" "$@"; }
+dc() { ensure_compose_env; docker compose --env-file "$COMPOSE_ENV_FILE" "$@"; }
 
 usage() {
   cat <<EOF

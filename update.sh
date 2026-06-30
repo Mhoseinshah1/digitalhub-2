@@ -27,7 +27,8 @@ cd "$INSTALL_DIR" || die "Install dir $INSTALL_DIR not found."
 ensure_compose_env() {
   [ -f "$COMPOSE_ENV_FILE" ] && return 0
   local pw
-  pw="$(grep -E '^DB_PASSWORD=' .env | head -n1 | cut -d= -f2-)"
+  pw="$(grep -E '^DB_PASSWORD=' .env | head -n1 | cut -d= -f2- || true)"
+  [ -n "$pw" ] || die "No DB_PASSWORD= line in .env; cannot generate compose.env."
   ( umask 077; printf 'DB_PASSWORD=%s\n' "${pw//\$/\$\$}" > "$COMPOSE_ENV_FILE" )
   chmod 600 "$COMPOSE_ENV_FILE"
 }
