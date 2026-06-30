@@ -139,9 +139,16 @@ prompt_inputs() {
   done
   WEB_ADMIN_PASSWORD="$pw1"
 
-  read -rsp "  Database password (Enter to keep existing/generate): " DB_PASSWORD; echo
-  if [ -z "$DB_PASSWORD" ]; then
-    DB_PASSWORD="${EXISTING_DB_PASSWORD:-$(openssl rand -hex 16)}"
+  # The Postgres password is fixed when its data volume is first initialized
+  # and cannot be changed by editing .env. So if a prior install exists, reuse
+  # it unconditionally (no prompt) to guarantee app credentials match the
+  # volume. Only ask on a genuinely fresh install.
+  if [ -n "${EXISTING_DB_PASSWORD:-}" ]; then
+    DB_PASSWORD="$EXISTING_DB_PASSWORD"
+    c_info "  Reusing existing database password (change requires resetting the DB volume)."
+  else
+    read -rsp "  Database password (Enter to auto-generate): " DB_PASSWORD; echo
+    [ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(openssl rand -hex 16)"
   fi
 
   read -rp "  LOG_GROUP_ID (optional, Enter to skip): " LOG_GROUP_ID || true
@@ -210,7 +217,14 @@ start_stack() {
   done
 
   c_info "Running database migrations…"
-  ( cd "$INSTALL_DIR" && docker compose run --rm web alembic upgrade head )
+  if ! ( cd "$INSTALL_DIR" && docker compose run --rm web alembic upgrade head ); then
+    c_err "Migrations failed."
+    c_err "If this is 'password authentication failed for user \"appstore\"', the"
+    c_err "Postgres data volume was initialized with a different password than the"
+    c_err "current .env. With no real data yet (Phase 1) you can reset it safely:"
+    c_err "    cd $INSTALL_DIR && docker compose down -v && bash install.sh"
+    die "Aborting after migration failure."
+  fi
 
   c_info "Creating the main admin user…"
   ( cd "$INSTALL_DIR" && docker compose run --rm web python -m scripts.create_admin )
