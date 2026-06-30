@@ -35,9 +35,12 @@ require_ubuntu() {
 # Repoint apt at old-releases.ubuntu.com for End-Of-Life Ubuntu releases whose
 # regular mirrors have been retired (e.g. oracular). Backs up sources first.
 fix_eol_apt_sources() {
-  local codename ts
+  local codename ts backup_dir
   codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
   ts="$(date +%Y%m%d_%H%M%S)"
+  # Keep backups OUT of sources.list.d/ so apt doesn't warn about them.
+  backup_dir="/var/backups/appstore-apt-${ts}"
+  mkdir -p "$backup_dir"
   c_warn "apt update failed — your Ubuntu release ('${codename:-unknown}') looks End-Of-Life."
   printf '    Repoint apt to old-releases.ubuntu.com so packages can be installed? [y/N] '
   read -r reply
@@ -48,8 +51,7 @@ fix_eol_apt_sources() {
 
   # deb822 format (Ubuntu 24.x default): /etc/apt/sources.list.d/ubuntu.sources
   if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-    cp -a /etc/apt/sources.list.d/ubuntu.sources \
-      "/etc/apt/sources.list.d/ubuntu.sources.bak.${ts}"
+    cp -a /etc/apt/sources.list.d/ubuntu.sources "$backup_dir/"
     sed -i -E \
       -e 's#https?://[a-zA-Z0-9._-]*archive\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
       -e 's#https?://security\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
@@ -57,13 +59,13 @@ fix_eol_apt_sources() {
   fi
   # classic format: /etc/apt/sources.list
   if [ -f /etc/apt/sources.list ]; then
-    cp -a /etc/apt/sources.list "/etc/apt/sources.list.bak.${ts}"
+    cp -a /etc/apt/sources.list "$backup_dir/"
     sed -i -E \
       -e 's#https?://[a-zA-Z0-9._-]*archive\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
       -e 's#https?://security\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
       /etc/apt/sources.list
   fi
-  c_info "Sources repointed (backups saved with suffix .bak.${ts}). Retrying apt update…"
+  c_info "Sources repointed (backups saved in ${backup_dir}). Retrying apt update…"
   apt-get update -y >/dev/null 2>&1
 }
 
@@ -140,17 +142,9 @@ write_env() {
   secret_key="$(openssl rand -hex 48)"
   db_url="postgresql+asyncpg://appstore:${DB_PASSWORD}@db:5432/appstore"
 
-  c_info "Building images (needed to hash the admin password securely)…"
-  ( cd "$INSTALL_DIR" \
-    && DB_PASSWORD="$DB_PASSWORD" docker compose build web >/dev/null )
-
-  c_info "Hashing admin password with bcrypt…"
-  hash="$(cd "$INSTALL_DIR" && docker compose run --rm --no-deps \
-    -e PW="$WEB_ADMIN_PASSWORD" web \
-    python -c 'import os; from passlib.hash import bcrypt; print(bcrypt.hash(os.environ["PW"]))' \
-    | tr -d "\r")"
-  [ -n "$hash" ] || die "Failed to hash admin password."
-
+  # Write .env FIRST with a placeholder hash. The web service mounts .env via
+  # env_file, and compose also reads .env for ${DB_PASSWORD} interpolation, so
+  # it must exist before any `docker compose build/run` call below.
   c_info "Writing $env_file (chmod 600)…"
   umask 077
   cat > "$env_file" <<EOF
@@ -161,7 +155,7 @@ LOG_GROUP_ID=${LOG_GROUP_ID}
 
 WEB_DOMAIN=${WEB_DOMAIN}
 WEB_ADMIN_USERNAME=${WEB_ADMIN_USERNAME}
-WEB_ADMIN_PASSWORD_HASH=${hash}
+WEB_ADMIN_PASSWORD_HASH=PENDING
 
 DB_PASSWORD=${DB_PASSWORD}
 DATABASE_URL=${db_url}
@@ -171,6 +165,20 @@ REDIS_URL=redis://redis:6379/0
 SECRET_KEY=${secret_key}
 EOF
   chmod 600 "$env_file"
+
+  c_info "Building the web image (used to hash the admin password securely)…"
+  ( cd "$INSTALL_DIR" && docker compose build web >/dev/null )
+
+  c_info "Hashing admin password with bcrypt…"
+  hash="$(cd "$INSTALL_DIR" && docker compose run --rm --no-deps \
+    -e PW="$WEB_ADMIN_PASSWORD" web \
+    python -c 'import os; from passlib.hash import bcrypt; print(bcrypt.hash(os.environ["PW"]))' \
+    2>/dev/null | tr -d '\r' | tail -n 1)"
+  [ -n "$hash" ] || die "Failed to hash admin password."
+
+  # Patch the real hash into .env (preserves chmod 600).
+  sed -i "s|^WEB_ADMIN_PASSWORD_HASH=.*|WEB_ADMIN_PASSWORD_HASH=${hash}|" "$env_file"
+
   # Clear plaintext password from shell memory.
   unset WEB_ADMIN_PASSWORD pw1 pw2 2>/dev/null || true
   c_ok ".env written."
