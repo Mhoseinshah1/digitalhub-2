@@ -32,23 +32,70 @@ require_ubuntu() {
   [ "${ID:-}" = "ubuntu" ] || c_warn "Tested on Ubuntu; detected '${ID:-unknown}'. Continuing."
 }
 
+# Repoint apt at old-releases.ubuntu.com for End-Of-Life Ubuntu releases whose
+# regular mirrors have been retired (e.g. oracular). Backs up sources first.
+fix_eol_apt_sources() {
+  local codename ts
+  codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+  ts="$(date +%Y%m%d_%H%M%S)"
+  c_warn "apt update failed — your Ubuntu release ('${codename:-unknown}') looks End-Of-Life."
+  printf '    Repoint apt to old-releases.ubuntu.com so packages can be installed? [y/N] '
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) return 1 ;;
+  esac
+
+  # deb822 format (Ubuntu 24.x default): /etc/apt/sources.list.d/ubuntu.sources
+  if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+    cp -a /etc/apt/sources.list.d/ubuntu.sources \
+      "/etc/apt/sources.list.d/ubuntu.sources.bak.${ts}"
+    sed -i -E \
+      -e 's#https?://[a-zA-Z0-9._-]*archive\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
+      -e 's#https?://security\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
+      /etc/apt/sources.list.d/ubuntu.sources
+  fi
+  # classic format: /etc/apt/sources.list
+  if [ -f /etc/apt/sources.list ]; then
+    cp -a /etc/apt/sources.list "/etc/apt/sources.list.bak.${ts}"
+    sed -i -E \
+      -e 's#https?://[a-zA-Z0-9._-]*archive\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
+      -e 's#https?://security\.ubuntu\.com/ubuntu#http://old-releases.ubuntu.com/ubuntu#g' \
+      /etc/apt/sources.list
+  fi
+  c_info "Sources repointed (backups saved with suffix .bak.${ts}). Retrying apt update…"
+  apt-get update -y >/dev/null 2>&1
+}
+
 install_prereqs() {
   c_info "Checking prerequisites…"
-  apt-get update -y >/dev/null
 
-  command -v git >/dev/null 2>&1 || { c_info "Installing git…"; apt-get install -y git >/dev/null; }
-  command -v curl >/dev/null 2>&1 || apt-get install -y curl >/dev/null
+  # apt update may fail on EOL releases; tolerate it and offer a repair.
+  if ! apt-get update -y >/dev/null 2>&1; then
+    fix_eol_apt_sources || c_warn "Continuing without a working apt index; \
+already-installed tools will still be used."
+  fi
+
+  apt_install() {  # install a package, surfacing a clear error on failure
+    apt-get install -y "$1" >/dev/null 2>&1 \
+      || die "Could not install '$1' (apt is unavailable). Install it manually and re-run."
+  }
+
+  command -v git  >/dev/null 2>&1 || { c_info "Installing git…";  apt_install git; }
+  command -v curl >/dev/null 2>&1 || { c_info "Installing curl…"; apt_install curl; }
 
   if ! command -v docker >/dev/null 2>&1; then
     c_info "Installing Docker…"
-    curl -fsSL https://get.docker.com | sh >/dev/null
+    curl -fsSL https://get.docker.com | sh >/dev/null \
+      || die "Docker installation failed. Install Docker Engine manually and re-run."
   fi
 
   if ! docker compose version >/dev/null 2>&1; then
     c_info "Installing Docker Compose plugin…"
-    apt-get install -y docker-compose-plugin >/dev/null || true
+    apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true
   fi
-  docker compose version >/dev/null 2>&1 || die "Docker Compose not available."
+  docker compose version >/dev/null 2>&1 \
+    || die "Docker Compose plugin not available. Install 'docker-compose-plugin' and re-run."
   c_ok "Prerequisites ready."
 }
 
